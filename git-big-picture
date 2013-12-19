@@ -279,8 +279,8 @@ class inter_repo_analyzer(object):
         samesha1=list()
         for w,z in product(*[b[2],c[2]]):
             if w.tree.hex == z.tree.hex:
-                if not w.tree.hex in samesha1:
-                    samesha1.append(w.tree.hex)    
+                if not w.tree.hex[0:7] in samesha1:
+                    samesha1.append(w.tree.hex[0:7])
             #spin(self.spindex)
             #self.spindex=(self.spindex+1)%4
         info(self.gitdir,': ',b[1],' and ',c[1],' have ',len(samesha1),' identical sha1s')
@@ -890,9 +890,10 @@ class CommitGraph(object):
                 return sha_one
             else:
                 return sha_one[0:sha_one_digits]
-                
+
         def format_label(sha_one):
-    	    return commands.getstatusoutput('git show --oneline ' + sha_one + ' | head -n 1')[1].replace('"', '').replace('\'', '').replace(' ', '\\n', 1)
+            data=commands.getstatusoutput('git show --oneline ' + sha_one + ' | head -n 1')[1].replace('"', '').replace('\'', '').replace(' ', '\\n', 1)
+            return (data[:20] + '..') if len(data) > 20 else data
 
         def label_gen():
             keys = set(self.branches.keys()).union(set(self.tags.keys()))
@@ -916,8 +917,10 @@ class CommitGraph(object):
         for sha_one, labels, color in label_gen():
             fontsize=14.0
             if not analyzer is None:
+                info(analyzer.getHistogram())
                 if sha_one in analyzer.getHistogram():
                     fontsize=14.0+analyzer.getHistogram()[sha_one]
+                    info("Using fontsize = ",fontsize)
             dot_file_lines.append('\t"%(ref)s"[label="%(label)s", color="%(color)s", style=filled, fontsize=%(fontsize)s];' % {
                 'ref':sha_one,
                 'label':'\\n'.join(labels \
