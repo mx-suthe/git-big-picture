@@ -33,6 +33,8 @@ import sys
 import tempfile
 import string
 import commands
+import threading
+import thread
 
 __version__ = '1.0.0-dev'
 __docformat__ = "restructuredtext"
@@ -261,9 +263,11 @@ def spin(index):
     sys.stderr.write(spinchar[index])
 
 # Eric McCann
-analyzer=None
+
 import pygit2 as g
 from itertools import *
+from Levenshtein import ratio
+from multiprocessing.pool import ThreadPool
 class inter_repo_analyzer(object):
     def __init__(self, repo_dir):
         self.gitdir=repo_dir
@@ -275,16 +279,19 @@ class inter_repo_analyzer(object):
         for x in self.repo.listall_branches(g.GIT_BRANCH_LOCAL):
             if not x in self.repomap:
                 self.repomap[x] = list()
-    def compareSha1s(self,b,c):
-        samesha1=list()
+    def compare(self,b,c):
         for w,z in product(*[b[2],c[2]]):
             if w.tree.hex == z.tree.hex:
-                if not w.tree.hex[0:7] in samesha1:
-                    samesha1.append(w.tree.hex[0:7])
-            #spin(self.spindex)
-            #self.spindex=(self.spindex+1)%4
-        info(self.gitdir,': ',b[1],' and ',c[1],' have ',len(samesha1),' identical sha1s')
-        return samesha1
+                if not w.tree.hex in self.dupehist:
+                    self.dupehist[w.tree.hex]=0
+                self.dupehist[w.tree.hex]=self.dupehist[w.tree.hex]+1
+            if ratio(w.message,z.message) > 0.5:
+                if not w.tree.hex in self.dupehist:
+                    self.dupehist[w.tree.hex]=0
+                self.dupehist[w.tree.hex]=self.dupehist[w.tree.hex]+1
+                if not z.tree.hex in self.dupehist:
+                    self.dupehist[z.tree.hex]=0
+                self.dupehist[z.tree.hex]=self.dupehist[z.tree.hex]+1
     def analyze(self):
         #all_refs = self.repo.listall_references()
         tocompare=list()
@@ -292,17 +299,14 @@ class inter_repo_analyzer(object):
             n=b
             ref = self.repo.lookup_branch(n, g.GIT_BRANCH_LOCAL)
             if ref != None:
-                tocompare.append((ref.name,b,[y for y in self.repo.walk(self.repo.lookup_reference(ref.name).target, g.GIT_SORT_TOPOLOGICAL)]))
+                tocompare.append((ref.name,b,[y for y in self.repo.walk(self.repo.lookup_reference(ref.name).target, g.GIT_SORT_NONE)]))
             else:
                 info(n," HAS A NULL BRANCH")
-        shadupes=list()
-        for b,c in combinations(tocompare,2):
-            shadupes.append(self.compareSha1s(b, c))
-        for t in shadupes:
-            for y in t:
-                if not y in self.dupehist:
-                    self.dupehist[y]=0
-                self.dupehist[y]=self.dupehist[y]+1
+        self.shadupes=list()
+        self.msgdupes=list()
+        combs = combinations(tocompare,2)
+        for (b,c) in combs:
+            self.compare(b,c)
         for k in self.dupehist:
             info(k,' == ',self.dupehist[k])
     def getHistogram(self):
@@ -893,7 +897,7 @@ class CommitGraph(object):
 
         def format_label(sha_one):
             data=commands.getstatusoutput('git show --oneline ' + sha_one + ' | head -n 1')[1].replace('"', '').replace('\'', '').replace(' ', '\\n', 1)
-            return (data[:20] + '..') if len(data) > 20 else data
+            return (data[:30] + '..') if len(data) > 30 else data
 
         def label_gen():
             keys = set(self.branches.keys()).union(set(self.tags.keys()))
@@ -914,26 +918,26 @@ class CommitGraph(object):
         dot_file_lines = ['digraph {']
         dot_file_lines.append('\toverlap = scale;')
         dot_file_lines.append('\tsplines = true;')
-        for sha_one, labels, color in label_gen():
-            fontsize=14.0
-            if not analyzer is None:
-                info(analyzer.getHistogram())
-                if sha_one in analyzer.getHistogram():
-                    fontsize=14.0+analyzer.getHistogram()[sha_one]
-                    info("Using fontsize = ",fontsize)
-            dot_file_lines.append('\t"%(ref)s"[label="%(label)s", color="%(color)s", style=filled, fontsize=%(fontsize)s];' % {
+        for sha_one, labels, color in label_gen():            
+            dot_file_lines.append('\t"%(ref)s"[label="%(label)s", color="%(color)s", style=filled];' % {
                 'ref':sha_one,
                 'label':'\\n'.join(labels \
                     + (sha_ones_on_labels and [format_sha_one(sha_one),] or list())),
-                'color':color,
-                 'fontsize':str(fontsize)})
+                'color':color})
         for sha_one in self.dotdot:
             dot_file_lines.append('\t"%(ref)s"[label="..."];' % {'ref':sha_one})
+        global analyzer
         if (sha_one_digits is not None) and (sha_one_digits != 40):
             for sha_one in (e for e in self.parents.keys() if not (self._has_label(e) or e in self.dotdot)):
-                dot_file_lines.append('\t"%(ref)s"[label="%(label)s"];' % {
+                fontsize=14.0
+                if not analyzer is None:
+                    if (sha_one in analyzer.getHistogram()):
+                        fontsize=14.0+analyzer.getHistogram()[sha_one]
+                        info("Using fontsize = ",fontsize)
+                dot_file_lines.append('\t"%(ref)s"[label="%(label)s", fontsize=%(fontsize)s];' % {
                     'ref':sha_one,
-                    'label':format_label(sha_one)})
+                    'label':format_label(sha_one),
+                    'fontsize':str(fontsize)})
         for child, self.parents in self.parents.items():
             for p in self.parents:
                 dot_file_lines.append('\t"%(source)s" -> "%(target)s";' % {'source':child, 'target':p})
@@ -953,7 +957,7 @@ def main(opts, args):
             FILTER_DEFAULTS,
             graph.git.config(FILTER_SETTINGS),
             parse_filter_options(opts))
-    
+    global analyzer
     if opts.weight_duplicates:
         debug('bam')
         analyzer = inter_repo_analyzer(repo_dir)
