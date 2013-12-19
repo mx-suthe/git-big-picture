@@ -31,6 +31,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import string
 
 __version__ = '1.0.0-dev'
 __docformat__ = "restructuredtext"
@@ -42,12 +43,14 @@ PROCESSED = 'processed'
 FORMAT    = 'format'
 VIEWER    = 'viewer'
 OUT_FILE  = 'outfile'
+WEIGHT_DUPLICATES = 'weight_duplicates'
 OUTPUT_SETTINGS = [
         FORMAT,
         GRAPHVIZ,
         PROCESSED,
         VIEWER,
         OUT_FILE,
+        WEIGHT_DUPLICATES
         ]
 OUTPUT_DEFAULTS = {
         FORMAT:    'svg',
@@ -55,6 +58,7 @@ OUTPUT_DEFAULTS = {
         PROCESSED: False,
         VIEWER:    False,
         OUT_FILE:  False,
+        WEIGHT_DUPLICATES: False,
         }
 
 # filter settings
@@ -102,6 +106,14 @@ def create_parser():
     parser = optparse.OptionParser(usage=USAGE, version=__version__)
     format_group = optparse.OptionGroup(parser, "Output Options",
             "Options to control output and format")
+
+    # graphviz options -- Eric McCann
+    format_group.add_option('-w', '--weight-duplicates',
+            action='store_true', dest='weight_duplicates',
+            help='enable weighting of duplicates between branches')
+    format_group.add_option('-W', '--no-weight-duplicates',
+            action='store_true', dest='no_weight_duplicates',
+            help='disable weighting of duplicates between branches')
 
     # output options
     format_group.add_option('-f', '--format',
@@ -197,6 +209,7 @@ def create_parser():
 
     return parser
 
+
 PARSER = create_parser()
 
 
@@ -237,8 +250,62 @@ def debug(message):
 
     """
     if DEBUG:
-        sys.stdout.write('debug:   %s\n' % message)
+        sys.stderr.write('debug:   %s\n' % message)
 
+def info(*message):
+    sys.stderr.write('\ninfo:   %s\n' % string.join((map(str, message)),' '))
+
+spinchar=('\r/','\r-','\r\\','\r|')
+def spin(index):
+    sys.stderr.write(spinchar[index])
+
+# Eric McCann
+analyzer=None
+import pygit2 as g
+from itertools import *
+class inter_repo_analyzer(object):
+    def __init__(self, repo_dir):
+        self.gitdir=repo_dir
+        info('initialized voodoo in: ',self.gitdir)
+        self.spindex=0
+        self.repo = g.Repository(self.gitdir)
+        self.repomap = {}
+        self.dupehist={}
+        for x in self.repo.listall_branches(g.GIT_BRANCH_LOCAL):
+            if not x in self.repomap:
+                self.repomap[x] = list()
+    def compareSha1s(self,b,c):
+        samesha1=list()
+        for w,z in product(*[b[2],c[2]]):
+            if w.tree.hex == z.tree.hex:
+                if not w.tree.hex in samesha1:
+                    samesha1.append(w.tree.hex)    
+            #spin(self.spindex)
+            #self.spindex=(self.spindex+1)%4
+        info(self.gitdir,': ',b[1],' and ',c[1],' have ',len(samesha1),' identical sha1s')
+        return samesha1
+    def analyze(self):
+        #all_refs = self.repo.listall_references()
+        tocompare=list()
+        for b in self.repomap:
+            n=b
+            ref = self.repo.lookup_branch(n, g.GIT_BRANCH_LOCAL)
+            if ref != None:
+                tocompare.append((ref.name,b,[y for y in self.repo.walk(self.repo.lookup_reference(ref.name).target, g.GIT_SORT_TOPOLOGICAL)]))
+            else:
+                info(n," HAS A NULL BRANCH")
+        shadupes=list()
+        for b,c in combinations(tocompare,2):
+            shadupes.append(self.compareSha1s(b, c))
+        for t in shadupes:
+            for y in t:
+                if not y in self.dupehist:
+                    self.dupehist[y]=0
+                self.dupehist[y]=self.dupehist[y]+1
+        for k in self.dupehist:
+            info(k,' == ',self.dupehist[k])
+    def getHistogram(self):
+        return self.dupehist
 
 def parse_variable_args(args):
     """ Parse arguments and get repo_dir.
@@ -840,12 +907,19 @@ class CommitGraph(object):
                 yield (k, labels, color)
 
         dot_file_lines = ['digraph {']
+        dot_file_lines.append('\toverlap = scale;')
+        dot_file_lines.append('\tsplines = true;')
         for sha_one, labels, color in label_gen():
-            dot_file_lines.append('\t"%(ref)s"[label="%(label)s", color="%(color)s", style=filled];' % {
+            fontsize=14.0
+            if not analyzer is None:
+                if sha_one in analyzer.getHistogram():
+                    fontsize=14.0+analyzer.getHistogram()[sha_one]
+            dot_file_lines.append('\t"%(ref)s"[label="%(label)s", color="%(color)s", style=filled, fontsize=%(fontsize)s];' % {
                 'ref':sha_one,
                 'label':'\\n'.join(labels \
                     + (sha_ones_on_labels and [format_sha_one(sha_one),] or list())),
-                'color':color})
+                'color':color,
+                 'fontsize':str(fontsize)})
         for sha_one in self.dotdot:
             dot_file_lines.append('\t"%(ref)s"[label="..."];' % {'ref':sha_one})
         if (sha_one_digits is not None) and (sha_one_digits != 40):
@@ -872,6 +946,12 @@ def main(opts, args):
             FILTER_DEFAULTS,
             graph.git.config(FILTER_SETTINGS),
             parse_filter_options(opts))
+    
+    if opts.weight_duplicates:
+        debug('bam')
+        analyzer = inter_repo_analyzer(repo_dir)
+        analyzer.analyze()
+
     if opts.all_commits:
         sha_one_digits = graph._minimal_sha_one_digits()
     else:
@@ -940,7 +1020,6 @@ def main(opts, args):
 if __name__ == '__main__':
 
     opts, args = PARSER.parse_args()
-
     if opts.debug is not None:
         DEBUG = True
         debug('Activate debug')
