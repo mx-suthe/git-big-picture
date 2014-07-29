@@ -893,7 +893,18 @@ class CommitGraph(object):
 
         def format_label(sha_one):
             data=commands.getstatusoutput('git show --oneline ' + sha_one + ' | head -n 1')[1].replace('"', '').replace('\'', '').replace(' ', '\\n', 1)
-            return (data[:30] + '..') if len(data) > 30 else data
+            max_len = 100
+            """ splits commit data into multiple lines. """
+            max_line_len = 25
+            min_line_len = 10
+            while (data.rfind('\\n', -1 * max_line_len) == -1):
+                i = data.rfind('\\n')
+                space_position = data.rfind(' ', i+min_line_len, i+max_line_len)
+                if space_position > -1:
+                    data = data[:space_position] + '\\n' + data[space_position+1:]
+                else:
+                    data = data[:i+max_line_len] + '\\n' + data[i+max_line_len:]
+            return (data[:max_len] + '..') if len(data) > max_len else data
 
         def label_gen():
             keys = set(self.branches.keys()).union(set(self.tags.keys()))
